@@ -4,8 +4,9 @@
 //! similar to the Python version while maintaining Rust's safety and performance benefits.
 
 use anyhow::{anyhow, Result};
-use aw_client_rust::classes::{default_classes, CategoryId, CategorySpec, ClassSetting};
-use aw_client_rust::queries::{DesktopQueryParams, QueryParams, QueryParamsBase};
+use aw_client_rust::classes::ClassSetting;
+use aw_client_rust::queries::{active_status_query, category_totals_query};
+use aw_client_rust::rules_v2::ProfileQueryRequest;
 use aw_models::TimeInterval;
 use chrono::{DateTime, Datelike, Duration, Local, TimeZone, Timelike, Utc};
 use clap::Parser;
@@ -647,7 +648,7 @@ fn query_activitywatch(date: Option<DateTime<Utc>>) -> Result<HashMap<String, f6
 
     let date = date.unwrap_or_else(|| Local::now().with_timezone(&Utc));
 
-    // Set timeperiod to the requested date (like old version)
+    // Query the complete reporting day in local time.
     let local_date = date.with_timezone(&Local);
     log::debug!(
         "Query date in local timezone: {}",
@@ -671,51 +672,20 @@ fn query_activitywatch(date: Option<DateTime<Utc>>) -> Result<HashMap<String, f6
         day_start + TIME_OFFSET + Duration::days(1),
     );
 
-    // Build QueryParams like old version
-    let bid_window = format!("aw-watcher-window_{}", hostname);
-    let bid_afk = format!("aw-watcher-afk_{}", hostname);
+    // Compile the selected profile from this exact server. This honors stored
+    // source roles, active expressions, interval policies, and category sets.
+    let canonical_events = client
+        .build_profile_query_v2(&ProfileQueryRequest::for_hostname(hostname.clone()))?
+        .query()
+        .map_err(|error| anyhow!(error))?;
 
-    let always_active_pattern = match client.get_setting("always_active_pattern") {
-        Ok(v) => v.as_str().map(|s| s.to_string()),
-        Err(e) => {
-            log::warn!("Failed to fetch always_active_pattern: {}", e);
-            None
-        }
-    };
-
-    let base_params = QueryParamsBase {
-        bid_browsers: vec![],
-        classes: get_server_classes(),
-        filter_classes: vec![],
-        filter_afk: true,
-        include_audible: true,
-    };
-
-    let desktop_params = DesktopQueryParams {
-        base: base_params,
-        bid_window,
-        bid_afk,
-        always_active_pattern,
-    };
-    let query_params = QueryParams::Desktop(desktop_params);
-
-    // Generate canonical events query (like old version)
-    let canonical_events = query_params.canonical_events();
-
-    // Build the complete query
-    let query = format!(
-        r#"{}
-duration = sum_durations(events);
-cat_events = sort_by_duration(merge_events_by_keys(events, ["$category"]));
-RETURN = {{"duration": duration, "cat_events": cat_events}};"#,
-        canonical_events
-    );
+    let query = category_totals_query(&canonical_events);
 
     // Execute the query
     let timeperiods = vec![(*timeperiod.start(), *timeperiod.end())];
     let result = client.query(&query, timeperiods)?;
 
-    // Get first result (like old version)
+    // The query has one requested time period.
     let result = result
         .into_iter()
         .next()
@@ -723,14 +693,14 @@ RETURN = {{"duration": duration, "cat_events": cat_events}};"#,
 
     let mut cat_time = HashMap::new();
 
-    // Process cat_events from the query result (exactly like old version)
+    // Convert category totals into the notification model.
     if let Some(cat_events) = result.get("cat_events").and_then(|ce| ce.as_array()) {
         for event in cat_events {
             if let (Some(category), Some(duration)) = (
                 event.get("data").and_then(|d| d.get("$category")),
                 event.get("duration").and_then(|d| d.as_f64()),
             ) {
-                // Handle both string and array category formats (like old version)
+                // Accept hierarchical arrays and frozen string-shaped results.
                 let cat_name = if let Some(cat_array) = category.as_array() {
                     // For hierarchical categories like ["Work", "Programming", "ActivityWatch"],
                     // join them with " > " to preserve the full hierarchy
@@ -756,7 +726,7 @@ RETURN = {{"duration": duration, "cat_events": cat_events}};"#,
         }
     }
 
-    // Add "All" category with total duration if we have data (like old version)
+    // Include the total used by thresholds and percentage calculations.
     if let Some(total_duration) = result.get("duration").and_then(|d| d.as_f64()) {
         cat_time.insert("All".to_string(), total_duration);
     } else if !cat_time.is_empty() {
@@ -834,7 +804,7 @@ fn send_checkin(title: &str, date: Option<DateTime<Utc>>) -> Result<()> {
 
     let cat_time = get_time(date, CategoryAggregation::TopLevelOnly)?;
 
-    // Get top categories with clean formatting (like old version)
+    // Keep the notification compact by showing only the leading categories.
     let top_categories = get_top_level_categories_for_notifications(&cat_time, 0.02, 4);
 
     if !top_categories.is_empty() {
@@ -1299,53 +1269,29 @@ fn start_http_server(shutdown_rx: Receiver<()>, port: u16) {
     });
 }
 
+fn active_status_from_query_result(result: &serde_json::Value) -> Option<bool> {
+    result
+        .get("duration")
+        .and_then(|duration| duration.as_f64())
+        .map(|duration| duration > 10.0)
+}
+
 fn get_active_status(hostname: &str) -> Result<Option<bool>> {
     let client = AW_CLIENT
         .get()
         .ok_or_else(|| anyhow!("Client not initialized"))?;
 
-    // Use query system that respects always-active-pattern
-    let bid_window = format!("aw-watcher-window_{}", hostname);
-    let bid_afk = format!("aw-watcher-afk_{}", hostname);
-
-    // Get the always_active_pattern setting
-    let always_active_pattern = match client.get_setting("always_active_pattern") {
-        Ok(v) => v.as_str().map(|s| s.to_string()),
-        Err(e) => {
-            log::debug!("Failed to fetch always_active_pattern: {}", e);
-            None
-        }
-    };
-
-    let base_params = QueryParamsBase {
-        bid_browsers: vec![],
-        classes: get_server_classes(),
-        filter_classes: vec![],
-        filter_afk: true,
-        include_audible: true,
-    };
-
-    let desktop_params = DesktopQueryParams {
-        base: base_params,
-        bid_window,
-        bid_afk,
-        always_active_pattern,
-    };
-    let query_params = QueryParams::Desktop(desktop_params);
-
-    // Generate canonical events query
-    let canonical_events = query_params.canonical_events();
+    // Use the same settings-aware profile and effective active mask as reports.
+    let canonical_events = client
+        .build_profile_query_v2(&ProfileQueryRequest::for_hostname(hostname))?
+        .query()
+        .map_err(|error| anyhow!(error))?;
 
     // Query the last 3 minutes to check for recent activity
     let now = Local::now().with_timezone(&Utc);
     let start = now - Duration::minutes(3);
 
-    let query = format!(
-        r#"{}
-duration = sum_durations(events);
-RETURN = {{"duration": duration}};"#,
-        canonical_events
-    );
+    let query = active_status_query(&canonical_events);
 
     let timeperiods = vec![(start, now)];
     let result = client.query(&query, timeperiods)?;
@@ -1356,10 +1302,9 @@ RETURN = {{"duration": duration}};"#,
         .next()
         .ok_or_else(|| anyhow!("No query results"))?;
 
-    if let Some(duration) = result.get("duration").and_then(|d| d.as_f64()) {
-        // Consider active if there's been more than 10 seconds of activity in the last 3 minutes
-        // This accounts for the pattern potentially marking windows as always-active
-        let is_active = duration > 10.0;
+    if let Some(is_active) = active_status_from_query_result(&result) {
+        let duration = result["duration"].as_f64().expect("validated duration");
+        // Consider active if there's been more than 10 seconds of configured activity.
         log::debug!(
             "Activity check: {:.1}s in last 3 minutes (active: {})",
             duration,
@@ -1611,19 +1556,6 @@ fn get_server_classes_settings() -> Vec<ClassSetting> {
     classes
 }
 
-// Get categorization classes from server with fallback to defaults
-fn get_server_classes() -> Vec<(CategoryId, CategorySpec)> {
-    let class_settings = get_server_classes_settings();
-    if class_settings.is_empty() {
-        return default_classes();
-    }
-
-    class_settings
-        .into_iter()
-        .map(|class| (class.name, class.rule))
-        .collect()
-}
-
 /// Aggregate hierarchical categories by their top-level category
 /// E.g., "Work > Programming > ActivityWatch" -> "Work"
 fn aggregate_categories_by_top_level(cat_time: &HashMap<String, f64>) -> HashMap<String, f64> {
@@ -1815,4 +1747,71 @@ fn get_all_level_categories_for_notifications(
         .into_iter()
         .map(|(cat, time)| (format_category_for_notification(&cat), time))
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use aw_client_rust::rules_v2::{compile_profile_v2, migrate_legacy_settings};
+    use aw_models::Bucket;
+    use serde_json::json;
+
+    fn bucket(id: &str, event_type: &str) -> Bucket {
+        serde_json::from_value(json!({
+            "id": id,
+            "type": event_type,
+            "client": "test",
+            "hostname": "host",
+            "created": null,
+            "events": null,
+            "last_updated": null
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn notifier_queries_compile_the_settings_aware_default_profile() {
+        let document = migrate_legacy_settings(&json!({}));
+        let buckets = [
+            ("window".to_string(), bucket("window", "currentwindow")),
+            ("afk".to_string(), bucket("afk", "afkstatus")),
+        ]
+        .into_iter()
+        .collect();
+        let capabilities = [
+            "query.query_bucket_optional_raw.v1",
+            "query.query_period.v1",
+            "query.flood_v2.v1",
+            "query.merge_subwatcher_fields.source_namespace.v1",
+            "query.active_periods_v2.v1",
+            "query.categorize_v2.v1",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+        let profile = compile_profile_v2(
+            &document,
+            &buckets,
+            capabilities,
+            &ProfileQueryRequest::for_hostname("host"),
+        )
+        .unwrap();
+        let canonical = profile.query().unwrap();
+        let totals = category_totals_query(&canonical);
+        let status = active_status_query(&canonical);
+
+        assert!(canonical.contains("query_bucket_optional_raw"));
+        assert!(canonical.contains("GitHub|Stack Overflow"));
+        assert!(totals.contains("cat_events = sort_by_duration"));
+        assert!(status.contains("duration = sum_durations(events)"));
+        assert!(!status.contains("cat_events"));
+        assert_eq!(
+            active_status_from_query_result(&json!({"duration": 30.0})),
+            Some(true)
+        );
+        assert_eq!(
+            active_status_from_query_result(&json!({"duration": 5.0})),
+            Some(false)
+        );
+    }
 }

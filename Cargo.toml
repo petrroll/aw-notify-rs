@@ -21,9 +21,10 @@ path = "src/main.rs"
 # Shared notification client + wire types (also re-used server-side)
 aw-notify-client = { path = "crates/aw-notify-client" }
 
-# ActivityWatch client
-aw-client-rust = {git = "https://github.com/ActivityWatch/aw-server-rust", branch="master"}
-aw-models = { git = "https://github.com/ActivityWatch/aw-server-rust.git", branch = "master" }
+# ActivityWatch client. AW_SERVER_RUST_PIN_PLACEHOLDER is synchronized with the
+# aw-server-rust gitlink by scripts/package/sync_aw_server_rust_pin.py.
+aw-client-rust = { git = "https://github.com/ActivityWatch/aw-server-rust", rev = "0666c19602d8783158f1c447d00ee6840a151451" }
+aw-models = { git = "https://github.com/ActivityWatch/aw-server-rust", rev = "0666c19602d8783158f1c447d00ee6840a151451" }
 
 # Command line interface
 clap = { version = "4.0", features = ["derive"] }

@@ -30,15 +30,16 @@ This is a Rust rewrite of the Python version, organized across multiple modules,
 ### Building from source
 
 ```bash
-# Clone the repository
-git clone https://github/0xbrayo/aw-notify-rs.git
+git clone https://github.com/ActivityWatch/aw-notify-rs.git
 cd aw-notify-rs
-
-# Build the application
 cargo build --release
 
 # The binary will be available at target/release/aw-notify
 ```
+
+The ActivityWatch client crates are pinned to one exact commit from
+`https://github.com/ActivityWatch/aw-server-rust`, so standalone builds and CI
+do not depend on a moving branch or an adjacent source checkout.
 
 ## Usage
 
@@ -472,6 +473,16 @@ cargo check
 
 # Run with logging
 RUST_LOG=debug cargo run -- --verbose checkin
+```
+
+To test an uncommitted adjacent `aw-server-rust` checkout, use an explicit Cargo
+patch without changing the committed dependency pins:
+
+```bash
+cargo \
+  --config 'patch."https://github.com/ActivityWatch/aw-server-rust".aw-client-rust.path="../aw-server-rust/aw-client-rust"' \
+  --config 'patch."https://github.com/ActivityWatch/aw-server-rust".aw-models.path="../aw-server-rust/aw-models"' \
+  check
 ```
 
 ## Troubleshooting
